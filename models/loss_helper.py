@@ -250,6 +250,27 @@ def get_loss(end_points, config):
     return loss, end_points
 
 def getKPLoss(end_points, ground_truth):
-    loss = 1
+    proposal = end_points['vote_xyz']
+    batch_size = proposal.size()[0]
+    points_per_tool = proposal.size()[1]
+    x_g = ground_truth['x_g'].view(batch_size, 1, 3)  # B * 3
+    x_f = ground_truth['x_f'].view(batch_size, 1, 3)
+    x_e = ground_truth['x_e'].view(batch_size, 1, 3)
+    x_g = x_g.repeat(1, points_per_tool, 1)
+    x_f = x_f.repeat(1, points_per_tool, 1)
+    x_e = x_e.repeat(1, points_per_tool, 1)
+    x_g = x_g.view(batch_size, 1, points_per_tool, 3)
+    x_f = x_f.view(batch_size, 1, points_per_tool, 3)
+    x_e = x_e.view(batch_size, 1, points_per_tool, 3)
+    GT = torch.cat((x_g, x_f), 1)
+    GT = torch.cat((GT, x_e), 1).cuda()  # batch_size, 3, 1024, 3
+
+    proposal = proposal.view(batch_size, 1, -1, 3)  # batch_size, 1, 1024, 3
+    proposal = proposal.repeat(1, 3, 1, 1)  # batch_size, 3, 1024, 3
+
+    delta = (proposal - GT).norm(dim=3, keepdim=True)  # batch_size, 3, 1024, 1
+    distance = delta.min(dim=1).values  # batch_size, 1024, 1
+    loss = torch.sum(distance) / batch_size / points_per_tool
+    print("loss = ", loss)
     return loss,end_points
 

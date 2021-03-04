@@ -4,13 +4,13 @@ import numpy as np
 import os
 import time
 
-def draw_point_cloud(data, with_no_gui = False, label=None, clusterCenters=None, title='feature visulization'):
+def draw_point_cloud(data_tensor, with_no_gui = False, label=None, clusterCenters=None, title='feature visulization'):
     plt.clf()
     fig = plt.figure()
-    data = data.view(-1, 3)
+    data_tensor = data_tensor.view(-1, 3).cpu()
+    data = data_tensor.detach().numpy()
     ax = fig.add_subplot(111, projection='3d')
     plt.rcParams['figure.max_open_warning'] = 400
-    print("data size = ", data.size())
     x = data[:, 0]
     y = data[:, 1]
     z = data[:, 2]

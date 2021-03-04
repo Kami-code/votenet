@@ -247,10 +247,10 @@ class PointnetSAModuleVotes(nn.Module):
             grouped_features, grouped_xyz, unique_cnt = self.grouper(
                 xyz, new_xyz, features
             )  # (B, C, npoint, nsample), (B,3,npoint,nsample), (B,npoint)
-
         new_features = self.mlp_module(
             grouped_features
         )  # (B, mlp[-1], npoint, nsample)
+
         if self.pooling == 'max':
             new_features = F.max_pool2d(
                 new_features, kernel_size=[1, new_features.size(3)]

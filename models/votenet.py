@@ -51,7 +51,7 @@ class VoteNet(nn.Module):
         self.num_heading_bin = num_heading_bin
         self.num_size_cluster = num_size_cluster
         self.mean_size_arr = mean_size_arr
-        assert(mean_size_arr.shape[0] == self.num_size_cluster)
+        #assert(mean_size_arr.shape[0] == self.num_size_cluster)
         self.input_feature_dim = input_feature_dim
         self.num_proposal = num_proposal
         self.vote_factor = vote_factor
@@ -63,9 +63,6 @@ class VoteNet(nn.Module):
         # Hough voting
         self.vgen = VotingModule(self.vote_factor, 256)
 
-        # Vote aggregation and detection
-        self.pnet = ProposalModule(num_class, num_heading_bin, num_size_cluster,
-            mean_size_arr, num_proposal, sampling)
 
     def forward(self, inputs):
         """ Forward pass of the network
@@ -84,13 +81,10 @@ class VoteNet(nn.Module):
         """
         # 输入B * N * 3
         end_points = {}
-        inputs['point_clouds'] = inputs['point_clouds'].view(-1, inputs['point_clouds'].shape[2], inputs['point_clouds'].shape[3])
+        #cdinputs['point_clouds'] = inputs['point_clouds'].view(-1, inputs['point_clouds'].shape[2], inputs['point_clouds'].shape[3])
         batch_size = inputs['point_clouds'].shape[0]
-        print("batch size :", batch_size)
-        print ("before backbone :", inputs['point_clouds'].size())
 
         end_points = self.backbone_net(inputs['point_clouds'], end_points)  # 跑一个pointnet++ backbone得到B * M * (3+C)
-        print("after backbone :", inputs['point_clouds'].size())
         # --------- HOUGH VOTING ---------
         xyz = end_points['fp2_xyz']
         features = end_points['fp2_features']
@@ -121,7 +115,7 @@ if __name__=='__main__':
     model = VoteNet(10, 12, 10, np.random.random((10, 3))).cuda()
     DATA_PATH = '../data/modelnet40_normal_resampled/'
     npoint = 2048
-    batch_size = 1
+    batch_size = 2
 
 
     # Define dataset
@@ -130,11 +124,12 @@ if __name__=='__main__':
 
     # Model forward pass
     sample = dict()
+    GT = dict()
     for point_cloud, x_g, x_f, x_e in testDataLoader:
         sample['point_clouds'] = point_cloud
-        sample['x_g'] = x_g
-        sample['x_f'] = x_f
-        sample['x_e'] = x_e
+        GT['x_g'] = x_g
+        GT['x_f'] = x_f
+        GT['x_e'] = x_e
         break
     print(sample['point_clouds'])
     draw_point_cloud(point_cloud, with_no_gui=True, title="origin")
@@ -146,18 +141,12 @@ if __name__=='__main__':
     #for key in end_points:
     #    print(key, end_points[key])
 
-    try:
-        # Compute loss
-        GT = 1
-        for key in sample:
-            end_points[key] = torch.from_numpy(sample[key]).unsqueeze(0).cuda()
-        loss, end_points = getKPLoss(end_points, GT)
-        print('loss', loss)
-        end_points['point_clouds'] = inputs['point_clouds']
-        end_points['pred_mask'] = np.ones((1, 128))
-        dump_results(end_points, 'tmp', GT)
-    except:
-        print('Dataset has not been prepared. Skip loss and dump.')
+    # Compute loss
+    for key in sample:
+        end_points[key] = sample[key].unsqueeze(0).cuda()
+    loss, end_points = getKPLoss(end_points, GT)
+    print('loss', loss)
+    #dump_results(end_points, 'tmp', GT)
 
 '''
 # The origin version of votenet

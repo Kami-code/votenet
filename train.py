@@ -1,7 +1,9 @@
+#encoding: utf-8
 # Copyright (c) Facebook, Inc. and its affiliates.
 # 
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+
 
 """ Training routine for 3D object detection with SUN RGB-D or ScanNet.
 
@@ -29,6 +31,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+from tensorboardX import SummaryWriter
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -36,8 +40,9 @@ sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 from pytorch_utils import BNMomentumScheduler
-from tf_visualizer import Visualizer as TfVisualizer
-from ap_helper import APCalculator, parse_predictions, parse_groundtruths
+#from tf_visualizer import Visualizer as TfVisualizer
+#from ap_helper import APCalculator, parse_predictions, parse_groundtruths
+from hammerLoader import hammerLoader
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', default='votenet', help='Model file name [default: votenet]')
@@ -45,7 +50,7 @@ parser.add_argument('--dataset', default='sunrgbd', help='Dataset name. sunrgbd 
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
 parser.add_argument('--log_dir', default='log', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--dump_dir', default=None, help='Dump dir to save sample outputs [default: None]')
-parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
+parser.add_argument('--num_point', type=int, default=2048, help='Point Number [default: 20000]')
 parser.add_argument('--num_target', type=int, default=256, help='Proposal number [default: 256]')
 parser.add_argument('--vote_factor', type=int, default=1, help='Vote factor [default: 1]')
 parser.add_argument('--cluster_sampling', default='vote_fps', help='Sampling strategy for vote clusters: vote_fps, seed_fps, random [default: vote_fps]')
@@ -110,54 +115,27 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 # Create Dataset and Dataloader
-if FLAGS.dataset == 'sunrgbd':
-    sys.path.append(os.path.join(ROOT_DIR, 'sunrgbd'))
-    from sunrgbd_detection_dataset import SunrgbdDetectionVotesDataset, MAX_NUM_OBJ
-    from model_util_sunrgbd import SunrgbdDatasetConfig
-    DATASET_CONFIG = SunrgbdDatasetConfig()
-    TRAIN_DATASET = SunrgbdDetectionVotesDataset('train', num_points=NUM_POINT,
-        augment=True,
-        use_color=FLAGS.use_color, use_height=(not FLAGS.no_height),
-        use_v1=(not FLAGS.use_sunrgbd_v2))
-    TEST_DATASET = SunrgbdDetectionVotesDataset('val', num_points=NUM_POINT,
-        augment=False,
-        use_color=FLAGS.use_color, use_height=(not FLAGS.no_height),
-        use_v1=(not FLAGS.use_sunrgbd_v2))
-elif FLAGS.dataset == 'scannet':
-    sys.path.append(os.path.join(ROOT_DIR, 'scannet'))
-    from scannet_detection_dataset import ScannetDetectionDataset, MAX_NUM_OBJ
-    from model_util_scannet import ScannetDatasetConfig
-    DATASET_CONFIG = ScannetDatasetConfig()
-    TRAIN_DATASET = ScannetDetectionDataset('train', num_points=NUM_POINT,
-        augment=True,
-        use_color=FLAGS.use_color, use_height=(not FLAGS.no_height))
-    TEST_DATASET = ScannetDetectionDataset('val', num_points=NUM_POINT,
-        augment=False,
-        use_color=FLAGS.use_color, use_height=(not FLAGS.no_height))
-else:
-    print('Unknown dataset %s. Exiting...'%(FLAGS.dataset))
-    exit(-1)
-print(len(TRAIN_DATASET), len(TEST_DATASET))
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=BATCH_SIZE,
-    shuffle=True, num_workers=4, worker_init_fn=my_worker_init_fn)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=BATCH_SIZE,
-    shuffle=True, num_workers=4, worker_init_fn=my_worker_init_fn)
-print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
+
+DATA_PATH = 'data/modelnet40_normal_resampled/'
+batch_size = 16
+TRAIN_DATASET = hammerLoader(root=DATA_PATH, npoints=NUM_POINT, split='test')
+TRAIN_DATALOADER = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=batch_size, shuffle=True, num_workers=4) # dataloader一次性创建num_worker个工作进程
+
+TEST_DATASET = hammerLoader(root=DATA_PATH, npoints=NUM_POINT, split='test')
+TEST_DATALOADER = torch.utils.data.DataLoader(TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=4) # dataloader一次性创建num_worker个工作进程
+
 
 # Init the model and optimzier
 MODEL = importlib.import_module(FLAGS.model) # import network module
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-num_input_channel = int(FLAGS.use_color)*3 + int(not FLAGS.no_height)*1
+num_input_channel = 0
 
-if FLAGS.model == 'boxnet':
-    Detector = MODEL.BoxNet
-else:
-    Detector = MODEL.VoteNet
+Detector = MODEL.VoteNet
 
-net = Detector(num_class=DATASET_CONFIG.num_class,
-               num_heading_bin=DATASET_CONFIG.num_heading_bin,
-               num_size_cluster=DATASET_CONFIG.num_size_cluster,
-               mean_size_arr=DATASET_CONFIG.mean_size_arr,
+net = Detector(num_class=1,
+               num_heading_bin=1,
+               num_size_cluster=3,
+               mean_size_arr=1,
                num_proposal=FLAGS.num_target,
                input_feature_dim=num_input_channel,
                vote_factor=FLAGS.vote_factor,
@@ -168,7 +146,7 @@ if torch.cuda.device_count() > 1:
   # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
   net = nn.DataParallel(net)
 net.to(device)
-criterion = MODEL.get_loss
+criterion = MODEL.getKPLoss
 
 # Load the Adam optimizer
 optimizer = optim.Adam(net.parameters(), lr=BASE_LEARNING_RATE, weight_decay=FLAGS.weight_decay)
@@ -189,6 +167,8 @@ BN_MOMENTUM_INIT = 0.5
 BN_MOMENTUM_MAX = 0.001
 bn_lbmd = lambda it: max(BN_MOMENTUM_INIT * BN_DECAY_RATE**(int(it / BN_DECAY_STEP)), BN_MOMENTUM_MAX)
 bnm_scheduler = BNMomentumScheduler(net, bn_lambda=bn_lbmd, last_epoch=start_epoch-1)
+writer1 = SummaryWriter('exp')
+
 
 def get_current_lr(epoch):
     lr = BASE_LEARNING_RATE
@@ -203,15 +183,15 @@ def adjust_learning_rate(optimizer, epoch):
         param_group['lr'] = lr
 
 # TFBoard Visualizers
-TRAIN_VISUALIZER = TfVisualizer(FLAGS, 'train')
-TEST_VISUALIZER = TfVisualizer(FLAGS, 'test')
+#TRAIN_VISUALIZER = TfVisualizer(FLAGS, 'train')
+#TEST_VISUALIZER = TfVisualizer(FLAGS, 'test')
 
 
 # Used for AP calculation
 CONFIG_DICT = {'remove_empty_box':False, 'use_3d_nms':True,
     'nms_iou':0.25, 'use_old_type_nms':False, 'cls_nms':True,
     'per_class_proposal': True, 'conf_thresh':0.05,
-    'dataset_config':DATASET_CONFIG}
+}
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG END
 
@@ -220,20 +200,27 @@ def train_one_epoch():
     adjust_learning_rate(optimizer, EPOCH_CNT)
     bnm_scheduler.step() # decay BN momentum
     net.train() # set model to training mode
-    for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
-        for key in batch_data_label:
-            batch_data_label[key] = batch_data_label[key].to(device)
+    sample = dict()
+    for batch_idx , train_data in enumerate(TRAIN_DATALOADER):
+        point_cloud, x_g, x_f, x_e = train_data
+        sample['point_clouds'] = point_cloud
+        sample['x_g'] = x_g
+        sample['x_f'] = x_f
+        sample['x_e'] = x_e
+        for key in sample:
+            sample[key] = sample[key].to(device)
 
         # Forward pass
         optimizer.zero_grad()
-        inputs = {'point_clouds': batch_data_label['point_clouds']}
+        inputs = {'point_clouds': sample['point_clouds']}
         end_points = net(inputs)
         
         # Compute loss and gradients, update parameters.
-        for key in batch_data_label:
+        for key in sample:
             assert(key not in end_points)
-            end_points[key] = batch_data_label[key]
-        loss, end_points = criterion(end_points, DATASET_CONFIG)
+            end_points[key] = sample[key]
+        loss, end_points = criterion(end_points, sample)
+        writer1.add_scalar("loss", loss, global_step=batch_idx, walltime=None)
         loss.backward()
         optimizer.step()
 
@@ -246,33 +233,39 @@ def train_one_epoch():
         batch_interval = 10
         if (batch_idx+1) % batch_interval == 0:
             log_string(' ---- batch: %03d ----' % (batch_idx+1))
-            TRAIN_VISUALIZER.log_scalars({key:stat_dict[key]/batch_interval for key in stat_dict},
-                (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*BATCH_SIZE)
+            #TRAIN_VISUALIZER.log_scalars({key:stat_dict[key]/batch_interval for key in stat_dict},
+            #    (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*BATCH_SIZE)
             for key in sorted(stat_dict.keys()):
                 log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
                 stat_dict[key] = 0
 
 def evaluate_one_epoch():
     stat_dict = {} # collect statistics
-    ap_calculator = APCalculator(ap_iou_thresh=FLAGS.ap_iou_thresh,
-        class2type_map=DATASET_CONFIG.class2type)
+    #ap_calculator = APCalculator(ap_iou_thresh=FLAGS.ap_iou_thresh,
+    #    class2type_map=DATASET_CONFIG.class2type)
     net.eval() # set model to eval mode (for bn and dp)
-    for batch_idx, batch_data_label in enumerate(TEST_DATALOADER):
+    sample=dict()
+    for batch_idx, train_data in enumerate(TEST_DATALOADER):
+        point_cloud, x_g, x_f, x_e = train_data
+        sample['point_clouds'] = point_cloud
+        sample['x_g'] = x_g
+        sample['x_f'] = x_f
+        sample['x_e'] = x_e
         if batch_idx % 10 == 0:
             print('Eval batch: %d'%(batch_idx))
-        for key in batch_data_label:
-            batch_data_label[key] = batch_data_label[key].to(device)
+        for key in sample:
+            sample[key] = sample[key].to(device)
         
         # Forward pass
-        inputs = {'point_clouds': batch_data_label['point_clouds']}
+        inputs = {'point_clouds': sample['point_clouds']}
         with torch.no_grad():
             end_points = net(inputs)
 
         # Compute loss
-        for key in batch_data_label:
+        for key in sample:
             assert(key not in end_points)
-            end_points[key] = batch_data_label[key]
-        loss, end_points = criterion(end_points, DATASET_CONFIG)
+            end_points[key] = sample[key]
+        loss, end_points = criterion(end_points, sample)
 
         # Accumulate statistics and print out
         for key in end_points:
@@ -280,26 +273,27 @@ def evaluate_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
-        batch_pred_map_cls = parse_predictions(end_points, CONFIG_DICT) 
-        batch_gt_map_cls = parse_groundtruths(end_points, CONFIG_DICT) 
-        ap_calculator.step(batch_pred_map_cls, batch_gt_map_cls)
+        #batch_pred_map_cls = parse_predictions(end_points, CONFIG_DICT)
+        #batch_gt_map_cls = parse_groundtruths(end_points, CONFIG_DICT)
+        #ap_calculator.step(batch_pred_map_cls, batch_gt_map_cls)
 
         # Dump evaluation results for visualization
-        if FLAGS.dump_results and batch_idx == 0 and EPOCH_CNT %10 == 0:
-            MODEL.dump_results(end_points, DUMP_DIR, DATASET_CONFIG) 
+        #if FLAGS.dump_results and batch_idx == 0 and EPOCH_CNT %10 == 0:
+        #    MODEL.dump_results(end_points, DUMP_DIR, sample)
 
     # Log statistics
-    TEST_VISUALIZER.log_scalars({key:stat_dict[key]/float(batch_idx+1) for key in stat_dict},
-        (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*BATCH_SIZE)
+    #TEST_VISUALIZER.log_scalars({key:stat_dict[key]/float(batch_idx+1) for key in stat_dict},
+    #    (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*BATCH_SIZE)
     for key in sorted(stat_dict.keys()):
         log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
 
     # Evaluate average precision
-    metrics_dict = ap_calculator.compute_metrics()
+    #metrics_dict = ap_calculator.compute_metrics()
     for key in metrics_dict:
         log_string('eval %s: %f'%(key, metrics_dict[key]))
 
     mean_loss = stat_dict['loss']/float(batch_idx+1)
+
     return mean_loss
 
 
@@ -307,7 +301,7 @@ def train(start_epoch):
     global EPOCH_CNT 
     min_loss = 1e10
     loss = 0
-    for epoch in range(start_epoch, MAX_EPOCH):
+    for epoch in tqdm(range(start_epoch, MAX_EPOCH)):
         EPOCH_CNT = epoch
         log_string('**** EPOCH %03d ****' % (epoch))
         log_string('Current learning rate: %f'%(get_current_lr(epoch)))
