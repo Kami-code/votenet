@@ -248,3 +248,8 @@ def get_loss(end_points, config):
     end_points['obj_acc'] = obj_acc
 
     return loss, end_points
+
+def getKPLoss(end_points, ground_truth):
+    loss = 1
+    return loss,end_points
+

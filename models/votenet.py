@@ -1,3 +1,4 @@
+#coding: UTF-8
 # Copyright (c) Facebook, Inc. and its affiliates.
 # 
 # This source code is licensed under the MIT license found in the
@@ -20,7 +21,7 @@ from backbone_module import Pointnet2Backbone
 from voting_module import VotingModule
 from proposal_module import ProposalModule
 from dump_helper import dump_results
-from loss_helper import get_loss
+from loss_helper import getKPLoss
 
 
 class VoteNet(nn.Module):
@@ -54,7 +55,7 @@ class VoteNet(nn.Module):
         self.input_feature_dim = input_feature_dim
         self.num_proposal = num_proposal
         self.vote_factor = vote_factor
-        self.sampling=sampling
+        self.sampling = sampling
 
         # Backbone point feature learning
         self.backbone_net = Pointnet2Backbone(input_feature_dim=self.input_feature_dim)
@@ -81,29 +82,85 @@ class VoteNet(nn.Module):
         Returns:
             end_points: dict
         """
+        # 输入B * N * 3
         end_points = {}
+        inputs['point_clouds'] = inputs['point_clouds'].view(-1, inputs['point_clouds'].shape[2], inputs['point_clouds'].shape[3])
         batch_size = inputs['point_clouds'].shape[0]
+        print("batch size :", batch_size)
+        print ("before backbone :", inputs['point_clouds'].size())
 
-        end_points = self.backbone_net(inputs['point_clouds'], end_points)
-                
+        end_points = self.backbone_net(inputs['point_clouds'], end_points)  # 跑一个pointnet++ backbone得到B * M * (3+C)
+        print("after backbone :", inputs['point_clouds'].size())
         # --------- HOUGH VOTING ---------
         xyz = end_points['fp2_xyz']
         features = end_points['fp2_features']
-        end_points['seed_inds'] = end_points['fp2_inds']
+        end_points['seed_inds'] = end_points['fp2_inds']  # 取fp2层的特征作为feature
         end_points['seed_xyz'] = xyz
         end_points['seed_features'] = features
+        # end_points['seed_xyz'] = B * M * 3
+        # end_points['seed_features'] = B * M * C
         
         xyz, features = self.vgen(xyz, features)
         features_norm = torch.norm(features, p=2, dim=1)
-        features = features.div(features_norm.unsqueeze(1))
+        features = features.div(features_norm.unsqueeze(1))  # 特征归一化
         end_points['vote_xyz'] = xyz
         end_points['vote_features'] = features
+        # end_points['vote_xyz'] = B * M * 3
+        # end_points['vote_features'] = B * M * C
 
-        end_points = self.pnet(xyz, features, end_points)
+        #end_points = self.pnet(xyz, features, end_points) #这行是跑proposal module，我们的任务中不需要
 
         return end_points
 
+import sys
+sys.path.append("..")
+from hammerLoader import hammerLoader
+from plot import *
 
+if __name__=='__main__':
+    model = VoteNet(10, 12, 10, np.random.random((10, 3))).cuda()
+    DATA_PATH = '../data/modelnet40_normal_resampled/'
+    npoint = 2048
+    batch_size = 1
+
+
+    # Define dataset
+    TEST_DATASET = hammerLoader(root=DATA_PATH, npoints=2048, split='test')
+    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=4) # dataloader一次性创建num_worker个工作进程
+
+    # Model forward pass
+    sample = dict()
+    for point_cloud, x_g, x_f, x_e in testDataLoader:
+        sample['point_clouds'] = point_cloud
+        sample['x_g'] = x_g
+        sample['x_f'] = x_f
+        sample['x_e'] = x_e
+        break
+    print(sample['point_clouds'])
+    draw_point_cloud(point_cloud, with_no_gui=True, title="origin")
+
+    inputs = {'point_clouds': (sample['point_clouds']).unsqueeze(0).cuda()}
+
+    end_points = model(inputs)
+    draw_point_cloud(end_points['vote_xyz'], with_no_gui=True, title="endpoint")
+    #for key in end_points:
+    #    print(key, end_points[key])
+
+    try:
+        # Compute loss
+        GT = 1
+        for key in sample:
+            end_points[key] = torch.from_numpy(sample[key]).unsqueeze(0).cuda()
+        loss, end_points = getKPLoss(end_points, GT)
+        print('loss', loss)
+        end_points['point_clouds'] = inputs['point_clouds']
+        end_points['pred_mask'] = np.ones((1, 128))
+        dump_results(end_points, 'tmp', GT)
+    except:
+        print('Dataset has not been prepared. Skip loss and dump.')
+
+'''
+# The origin version of votenet
 if __name__=='__main__':
     sys.path.append(os.path.join(ROOT_DIR, 'sunrgbd'))
     from sunrgbd_detection_dataset import SunrgbdDetectionVotesDataset, DC
@@ -138,3 +195,4 @@ if __name__=='__main__':
         dump_results(end_points, 'tmp', DC)
     except:
         print('Dataset has not been prepared. Skip loss and dump.')
+'''
